@@ -276,4 +276,89 @@ final class PeerMacroTests: XCTestCase {
       indentationWidth: indentationWidth
     )
   }
+  
+  func testCanDetectAdjacentAttributesInContext() {
+    enum FoundObjCAttribute: String, Error, CustomDebugStringConvertible {
+      case noMethod
+      case noAttribute
+      case notFound
+      case found
+      var debugDescription: String { rawValue }
+    }
+
+    struct FindObjCAttribute: PeerMacro {
+      static func expansion(
+        of node: AttributeSyntax,
+        providingPeersOf declaration: some DeclSyntaxProtocol,
+        in context: some MacroExpansionContext
+      ) throws -> [DeclSyntax] {
+        guard let methodDecl = declaration.as(FunctionDeclSyntax.self) else {
+          throw FoundObjCAttribute.noMethod
+        }
+        
+        guard let attribute = methodDecl.attributes.first(where: {
+          context.location(of: $0) != nil &&
+          $0.as(AttributeSyntax.self)?.attributeName.as(IdentifierTypeSyntax.self)?.name.text == "objc"
+        })?.as(AttributeSyntax.self) else {
+          throw FoundObjCAttribute.noAttribute
+        }
+
+        throw DiagnosticsError(diagnostics: [.alreadyContains(objcAttribute: attribute)])
+      }
+    }
+    
+    assertMacroExpansion(
+      """
+      @objc class Foo {
+        @objc @findObjCAttribute
+        func memberFunction() {}
+      }
+      """,
+      expandedSource: """
+      @objc class Foo {
+        @objc
+        func memberFunction() {}
+      }
+      """,
+      diagnostics: [
+        DiagnosticSpec(message: "Method already contains @objc attribute", line: 2, column: 3, severity: .error, fixIts: [FixItSpec(message: "Remove redundant @objc attribute")])],
+      macros: ["findObjCAttribute": FindObjCAttribute.self],
+      applyFixIts: ["Remove redundant @objc attribute"],
+      fixedSource: """
+      @objc class Foo {
+        @findObjCAttribute
+        func memberFunction() {}
+      }
+      """)
+  }
+}
+
+extension Diagnostic {
+    static func alreadyContains(objcAttribute attribute: AttributeSyntax) -> Diagnostic {
+        Diagnostic(node: attribute, message: RemoveObjCAttributeDiagnosticMessage(), fixIts: [
+            FixIt(removingObjcAttribute: attribute)
+        ])
+    }
+}
+
+struct RemoveObjCAttributeDiagnosticMessage: DiagnosticMessage {
+    let severity = DiagnosticSeverity.error
+    let diagnosticID: MessageID = .init(domain: "objcAttribute", id: "alreadyContainsObjCAttribute")
+    let message = "Method already contains @objc attribute"
+}
+
+struct RemoveObjCAttributeFixIt: FixItMessage {
+    let message = "Remove redundant @objc attribute"
+    let fixItID: MessageID = .init(domain: "objcAttribute", id: "removeObjCAttribute")
+}
+
+extension FixIt {
+    init(removingObjcAttribute attribute: AttributeSyntax) {
+        self.init(message: RemoveObjCAttributeFixIt(), changes: [
+            .replace(
+                oldNode: Syntax(attribute),
+                newNode: Syntax(TokenSyntax(.stringSegment(""), leadingTrivia: attribute.leadingTrivia, presence: .present))
+            )
+        ])
+    }
 }
